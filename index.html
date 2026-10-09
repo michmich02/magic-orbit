@@ -1,0 +1,1662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ASCII Orbit</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&display=swap');
+  *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+  html, body {
+    width:100%; height:100%; overflow:hidden;
+    background:#0D0812; font-family:'Courier New',monospace; color:#EBE0CD;
+  }
+  #videoWrap { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; }
+  #webcam { width:100%; height:100%; object-fit:cover; transform:scaleX(-1);
+    filter: none; }
+  #overlay { position:fixed; inset:0; width:100%; height:100%; z-index:10; pointer-events:none; }
+  #darkOverlay { position:fixed; inset:0; z-index:8; pointer-events:none;
+    background: rgba(0,0,0,0.5); }
+  #vignette { display:none; }
+  .corner-mark { position:fixed; z-index:12; pointer-events:none; width:32px; height:32px;
+    border-color: rgba(212,175,106,0.18); border-style:solid; border-width:0; }
+  .corner-mark.tl { top:14px; left:14px; border-top-width:1px; border-left-width:1px; }
+  .corner-mark.tr { top:14px; right:14px; border-top-width:1px; border-right-width:1px; }
+  .corner-mark.bl { bottom:14px; left:14px; border-bottom-width:1px; border-left-width:1px; }
+  .corner-mark.br { bottom:14px; right:14px; border-bottom-width:1px; border-right-width:1px; }
+  .hud { position:fixed; z-index:20; pointer-events:none; font-size:10px; letter-spacing:2px;
+    text-transform:uppercase; font-family:'Cinzel','Georgia',serif;
+    text-shadow:0 0 12px rgba(143,109,219,0.4), 0 0 4px rgba(212,175,106,0.3); color:rgba(236,224,205,0.85); }
+  #hudTL { top:22px; left:22px; line-height:1.7; font-family:'Courier New',monospace; font-size:14px; }
+  #hudTR { top:22px; right:22px; text-align:right; letter-spacing:3px; color:rgba(212,175,106,0.85);
+    font-size:18px; text-shadow:0 0 14px rgba(143,109,219,0.4); }
+  #hudBtm { bottom:28px; left:50%; transform:translateX(-50%); text-align:center;
+    letter-spacing:3px; font-size:15px; color:rgba(212,195,168,0.7); }
+  #initScreen { position:fixed; inset:0; z-index:100; background:#0D0812;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:30px; }
+  #initScreen .logo { font-family:'Cinzel','Georgia',serif; font-size:13px;
+    letter-spacing:10px; color:rgba(212,175,106,0.50);
+    text-shadow:0 0 20px rgba(143,109,219,0.2); }
+  #startBtn { font-family:'Cinzel','Georgia',serif; font-size:12px; letter-spacing:5px;
+    color:rgba(212,175,106,0.65); background:transparent;
+    border:1px solid rgba(212,175,106,0.22); padding:14px 48px; cursor:pointer; transition:all 0.4s; }
+  #startBtn:hover { color:rgba(229,201,138,0.95); border-color:rgba(212,175,106,0.5);
+    background:rgba(143,109,219,0.06); box-shadow:0 0 30px rgba(143,109,219,0.12), 0 0 60px rgba(212,175,106,0.06); }
+  #loadStatus { font-size:9px; letter-spacing:2px; color:rgba(212,195,168,0.22); }
+</style>
+</head>
+<body>
+
+<!-- Init -->
+<div id="initScreen">
+  <div class="logo">ASCII ORBIT</div>
+  <button id="startBtn">INITIALIZE</button>
+  <div id="loadStatus">CAMERA ACCESS REQUIRED</div>
+</div>
+
+<div id="videoWrap">
+  <video id="webcam" autoplay playsinline muted></video>
+</div>
+<div id="darkOverlay"></div>
+<div id="vignette"></div>
+<canvas id="overlay"></canvas>
+
+<div class="corner-mark tl"></div>
+<div class="corner-mark tr"></div>
+<div class="corner-mark bl"></div>
+<div class="corner-mark br"></div>
+
+<!-- HUD -->
+<div class="hud" id="hudTL">✦ AWAITING PRESENCE</div>
+<div class="hud" id="hudTR"></div>
+<div class="hud" id="hudBtm">BRING TWO FINGERS TOGETHER TO SUMMON</div>
+<div id="debugHud" style="position:fixed;top:60px;right:16px;color:#D4AF6A;font:11px 'Courier New',monospace;text-align:right;pointer-events:none;z-index:999;opacity:0.85;line-height:1.5;white-space:pre;"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script src="spells.js"></script>
+<script>
+/* ═══════════════════════════════════════
+   ASCII ORBIT — AR Hand Tracking Demo
+   ═══════════════════════════════════════ */
+
+const video    = document.getElementById('webcam');
+const canvas   = document.getElementById('overlay');
+const ctx      = canvas.getContext('2d');
+const hudTL    = document.getElementById('hudTL');
+const hudTR    = document.getElementById('hudTR');
+const hudBtm   = document.getElementById('hudBtm');
+const startBtn = document.getElementById('startBtn');
+const initScr  = document.getElementById('initScreen');
+const loadStat = document.getElementById('loadStatus');
+
+/* ── Web Audio — generated magical sounds ── */
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+function sfxSummon() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(0.12, now+0.05);
+  g.gain.exponentialRampToValueAtTime(0.001, now+0.8);
+  g.connect(audioCtx.destination);
+  [440, 660, 880].forEach((f,i) => {
+    const o = audioCtx.createOscillator();
+    o.type = 'sine'; o.frequency.setValueAtTime(f*0.5, now);
+    o.frequency.exponentialRampToValueAtTime(f*1.2, now+0.6);
+    o.connect(g); o.start(now+i*0.06); o.stop(now+0.8);
+  });
+}
+function sfxChime() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.1, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now+0.35);
+  g.connect(audioCtx.destination);
+  [1200, 1500, 1800].forEach((f,i) => {
+    const o = audioCtx.createOscillator();
+    o.type = 'sine'; o.frequency.value = f;
+    o.connect(g); o.start(now+i*0.04); o.stop(now+0.35);
+  });
+}
+function sfxWhoosh() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(0.15, now+0.1);
+  g.gain.exponentialRampToValueAtTime(0.001, now+0.6);
+  g.connect(audioCtx.destination);
+  // Noise-like sweep
+  const o = audioCtx.createOscillator();
+  o.type = 'sawtooth'; o.frequency.setValueAtTime(200, now);
+  o.frequency.exponentialRampToValueAtTime(80, now+0.5);
+  const filt = audioCtx.createBiquadFilter();
+  filt.type = 'lowpass'; filt.frequency.setValueAtTime(600, now);
+  filt.frequency.exponentialRampToValueAtTime(100, now+0.5);
+  o.connect(filt); filt.connect(g); o.start(now); o.stop(now+0.6);
+  // Shimmer overlay
+  const o2 = audioCtx.createOscillator();
+  o2.type = 'sine'; o2.frequency.setValueAtTime(800, now);
+  o2.frequency.exponentialRampToValueAtTime(400, now+0.4);
+  const g2 = audioCtx.createGain();
+  g2.gain.setValueAtTime(0.06, now);
+  g2.gain.exponentialRampToValueAtTime(0.001, now+0.4);
+  o2.connect(g2); g2.connect(audioCtx.destination); o2.start(now); o2.stop(now+0.5);
+}
+function sfxBlast() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.2, now);
+  g.gain.exponentialRampToValueAtTime(0.001, now+1.0);
+  g.connect(audioCtx.destination);
+  const o = audioCtx.createOscillator();
+  o.type = 'sawtooth'; o.frequency.setValueAtTime(120, now);
+  o.frequency.exponentialRampToValueAtTime(40, now+0.8);
+  const filt = audioCtx.createBiquadFilter();
+  filt.type = 'lowpass'; filt.frequency.setValueAtTime(400, now);
+  filt.frequency.exponentialRampToValueAtTime(60, now+0.8);
+  o.connect(filt); filt.connect(g); o.start(now); o.stop(now+1.0);
+  // Impact hit
+  const o2 = audioCtx.createOscillator();
+  o2.type = 'sine'; o2.frequency.setValueAtTime(180, now);
+  o2.frequency.exponentialRampToValueAtTime(30, now+0.3);
+  const g2 = audioCtx.createGain();
+  g2.gain.setValueAtTime(0.15, now);
+  g2.gain.exponentialRampToValueAtTime(0.001, now+0.3);
+  o2.connect(g2); g2.connect(audioCtx.destination); o2.start(now); o2.stop(now+0.4);
+}
+function sfxCharge() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(0.08, now+0.3);
+  g.gain.setValueAtTime(0.08, now+1.0);
+  g.gain.exponentialRampToValueAtTime(0.001, now+1.5);
+  g.connect(audioCtx.destination);
+  [220, 330, 440].forEach((f,i) => {
+    const o = audioCtx.createOscillator();
+    o.type = 'sine'; o.frequency.value = f;
+    o.connect(g); o.start(now+i*0.1); o.stop(now+1.5);
+  });
+}
+function sfxSeal() {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.12, now);
+  g.gain.linearRampToValueAtTime(0.06, now+0.3);
+  g.gain.exponentialRampToValueAtTime(0.001, now+1.2);
+  g.connect(audioCtx.destination);
+  // Deep locking tone
+  const o = audioCtx.createOscillator();
+  o.type = 'sine'; o.frequency.setValueAtTime(180, now);
+  o.frequency.exponentialRampToValueAtTime(90, now+0.8);
+  o.connect(g); o.start(now); o.stop(now+1.2);
+  // High shimmer — seal lock
+  const g2 = audioCtx.createGain();
+  g2.gain.setValueAtTime(0.08, now+0.05);
+  g2.gain.exponentialRampToValueAtTime(0.001, now+0.6);
+  g2.connect(audioCtx.destination);
+  [660, 990, 1320].forEach((f,i) => {
+    const o2 = audioCtx.createOscillator();
+    o2.type = 'sine'; o2.frequency.value = f;
+    o2.connect(g2); o2.start(now+0.05+i*0.03); o2.stop(now+0.6);
+  });
+}
+
+/* ── Hand skeleton connections ── */
+const CONNS = [
+  [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],[0,17]
+];
+
+/* ── State ── */
+let handData = [];
+let leftTip = null, rightTip = null, handCount = 0;
+let leftGesture = 'NONE', rightGesture = 'NONE';
+let rightPalmCenter = null;
+let leftPinch = false;
+let rightPinch = false;
+let leftPalmCenter = null;
+let rightPalmRaw = null;
+let leftFingerDir = null;  // {x,y} normalized finger direction
+let rightFingerDir = null;
+
+let globeX = 0, globeY = 0, globeR = 0, globeAlpha = 0;
+let globeActive = false;
+let rotA = 0, rotB = 0;  // rotA=0 fixed, Y-axis only
+
+// State machine
+let stage = 'IDLE';  // IDLE, GLOBE, SHAPE, CHARGE, SEAL, BLAST
+let shapeAlpha = 0, shapeX = 0, shapeY = 0;
+let shapeType = 0;
+const SHAPE_NAMES = ['FLAME','RUNE CIRCLE','CRYSTAL','PORTAL','LIGHTNING ORB'];
+let transformCD = 0, tapCD = 0, transTimer = 0;
+let wasFistTimer = 0;
+let wasBothFistTimer = 0;  // both hands were fist
+let globeGrace = 0;
+let blastParticles = [];
+
+const POS_LERP = 0.18, RAD_LERP = 0.18, ALPHA_LERP = 0.12;
+const RAD_SCALE = 0.75, RAD_MIN = 50, RAD_MAX = 450, SPELL_SZ = 120;
+
+// Afterimage on spell switch
+let prevSpellType = -1;
+let afterimageTimer = 0;
+let afterimageDust = [];
+
+// Hand ownership + transfer
+let activeHand = 'right';
+let transferCD = 0;
+let switchCD = 0;
+let isTransferring = false;
+let transferProgress = 0;
+let transferFromX = 0, transferFromY = 0;
+let transferToX = 0, transferToY = 0;
+// Swipe history for active hand fingertip
+const swipeHistory = []; // [{x,y,t}]
+const SWIPE_HISTORY_LEN = 10;
+
+// Hand velocity tracking
+let prevRightX = 0, prevRightY = 0;
+let handSpeed = 0; // smoothed speed 0-1
+
+// CHARGE state
+let chargePoseTimer = 0;    // frames holding charge pose
+let chargeTimer = 0;        // frames in CHARGE state
+let chargeAlpha = 0;
+let orbX = 0, orbY = 0;
+let initialChargeDist = 0;
+let initialChargeY = 0;
+let compressionRatio = 1;
+let blastThresholdFrames = 0;
+let chargeGrace = 0;
+let chargeParticles = [];
+const LUM = ' .,:;!|+oxO0#@';
+
+// SEAL state
+let sealActive = false;
+let sealTimer = 0;
+let sealCenterX = 0, sealCenterY = 0;
+let sealedDistance = 0;
+let sealedCenterY = 0;
+let sealRingAngle = 0;
+let sealGrace = 0;
+let releaseThresholdFrames = 0;
+let sealCrackTimer = 0;  // crack animation before blast
+
+/* ── Gesture classifier ── */
+function d3(a,b){const dx=a.x-b.x,dy=a.y-b.y,dz=(a.z||0)-(b.z||0);return Math.sqrt(dx*dx+dy*dy+dz*dz);}
+function classify(raw) {
+  const w=raw[0], tips=[8,12,16,20], mcps=[5,9,13,17];
+  let ext=[];
+  for(let i=0;i<4;i++){const td=d3(raw[tips[i]],w),md=d3(raw[mcps[i]],w);ext.push(md>0&&td/md>1.3);}
+  const cnt=ext.filter(Boolean).length;
+  if(cnt===0) return 'FIST';
+  // Check TWO_FINGER before PALM so it takes priority
+  if(ext[0]&&ext[1]&&!ext[3]) return 'TWO_FINGER';
+  if(ext[0]&&!ext[1]&&!ext[2]&&!ext[3]) return 'POINT';
+  if(cnt>=3) return 'PALM';
+  return 'OTHER';
+}
+
+/* ── MediaPipe results ── */
+function onResults(results) {
+  handData = []; leftTip = null; rightTip = null; handCount = 0;
+  leftGesture = 'NONE'; rightGesture = 'NONE'; rightPalmCenter = null; leftPalmCenter = null; rightPalmRaw = null;
+  leftPinch = false; rightPinch = false; leftFingerDir = null; rightFingerDir = null;
+  if (!results.multiHandLandmarks || !results.multiHandedness) return;
+  handCount = results.multiHandLandmarks.length;
+  for (let i = 0; i < handCount; i++) {
+    const raw = results.multiHandLandmarks[i];
+    // MediaPipe labels are mirrored for selfie cam — swap them
+    const mpLabel = results.multiHandedness[i].label;
+    const label = (mpLabel === 'Left') ? 'Right' : 'Left';
+    const pts = raw.map(lm => ({x:(1-lm.x)*canvas.width, y:lm.y*canvas.height}));
+    const gesture = classify(raw);
+    handData.push({ label, pts, gesture });
+    if (label === 'Left') {
+      leftTip = pts[8]; leftGesture = gesture;
+      // Pinch: thumb tip (4) close to index tip (8)
+      const thumbTip = raw[4], idxTip = raw[8];
+      const pd = Math.sqrt((thumbTip.x-idxTip.x)**2 + (thumbTip.y-idxTip.y)**2 + ((thumbTip.z||0)-(idxTip.z||0))**2);
+      leftPinch = pd < 0.07;
+      // Left palm center
+      const lids = [0,5,9,13,17];
+      let lsx=0,lsy=0; lids.forEach(j=>{lsx+=pts[j].x;lsy+=pts[j].y;});
+      leftPalmCenter = {x:lsx/5, y:lsy/5};
+      // Finger direction: fingertip center - palm center, normalized
+      const ltips = [8,12,16,20];
+      let ltx=0,lty=0; ltips.forEach(j=>{ltx+=pts[j].x;lty+=pts[j].y;});
+      const lfcx=ltx/4-lsx/5, lfcy=lty/4-lsy/5;
+      const lflen=Math.sqrt(lfcx*lfcx+lfcy*lfcy)||1;
+      leftFingerDir = {x:lfcx/lflen, y:lfcy/lflen};
+    }
+    else {
+      rightTip = pts[8]; rightGesture = gesture;
+      // Palm center = avg of wrist,5,9,13,17
+      const ids = [0,5,9,13,17];
+      let sx=0,sy=0; ids.forEach(j=>{sx+=pts[j].x;sy+=pts[j].y;});
+      rightPalmCenter = {x:sx/5, y:sy/5 - 70};
+      rightPalmRaw = {x:sx/5, y:sy/5};
+      // Finger direction
+      const rtips = [8,12,16,20];
+      let rtx=0,rty=0; rtips.forEach(j=>{rtx+=pts[j].x;rty+=pts[j].y;});
+      const rfcx=rtx/4-sx/5, rfcy=rty/4-sy/5;
+      const rflen=Math.sqrt(rfcx*rfcx+rfcy*rfcy)||1;
+      rightFingerDir = {x:rfcx/rflen, y:rfcy/rflen};
+      // Right pinch
+      const rThumb = raw[4], rIdx = raw[8];
+      const rpd = Math.sqrt((rThumb.x-rIdx.x)**2 + (rThumb.y-rIdx.y)**2 + ((rThumb.z||0)-(rIdx.z||0))**2);
+      rightPinch = rpd < 0.07;
+    }
+  }
+}
+
+
+/* ────────────────────────────────────
+   Draw hand skeleton
+   ──────────────────────────────────── */
+function drawHands(t) {
+  const pulse = 0.6 + 0.4 * Math.sin(t * 0.004);
+
+  for (const hand of handData) {
+    const pts = hand.pts;
+    // Arcane thread lines — gold
+    ctx.save();
+    ctx.strokeStyle = `rgba(212,175,106,${0.38 * pulse})`;
+    ctx.lineWidth = 1;
+    ctx.shadowColor = 'rgba(212,175,106,0.5)';
+    ctx.shadowBlur = 6;
+    for (const [a, b] of CONNS) {
+      ctx.beginPath(); ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y); ctx.stroke();
+    }
+    ctx.restore();
+    // Gold joint dots with purple shimmer on tips
+    ctx.save();
+    for (let j = 0; j < pts.length; j++) {
+      const p = pts[j];
+      const isTip = (j === 4 || j === 8 || j === 12 || j === 16 || j === 20);
+      const r = isTip ? 2.5 : 1.8;
+      if (isTip) {
+        // Purple shimmer behind tip
+        ctx.shadowColor = 'rgba(143,109,219,0.5)'; ctx.shadowBlur = 10;
+        ctx.fillStyle = `rgba(212,175,106,${0.85 * pulse})`;
+      } else {
+        ctx.shadowColor = 'rgba(212,175,106,0.5)'; ctx.shadowBlur = 4;
+        ctx.fillStyle = `rgba(212,175,106,${0.45 * pulse})`;
+      }
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    // Fingertip rune reticle — gold ring + purple diamond
+    const idx = pts[8];
+    ctx.save();
+    ctx.shadowColor = 'rgba(143,109,219,0.4)';
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = `rgba(212,175,106,${0.4 * pulse})`;
+    ctx.lineWidth = 0.8;
+    ctx.beginPath(); ctx.arc(idx.x, idx.y, 8, 0, Math.PI * 2); ctx.stroke();
+    // Small inner diamond — purple accent
+    ctx.strokeStyle = `rgba(143,109,219,${0.35 * pulse})`;
+    ctx.lineWidth = 0.6;
+    const d = 5;
+    ctx.beginPath();
+    ctx.moveTo(idx.x, idx.y-d); ctx.lineTo(idx.x+d, idx.y);
+    ctx.lineTo(idx.x, idx.y+d); ctx.lineTo(idx.x-d, idx.y);
+    ctx.closePath(); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+
+/* ────────────────────────────────────
+   Draw link line between fingertips
+   ──────────────────────────────────── */
+function drawLink(x1, y1, x2, y2, alpha, t) {
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.45;
+  // Purple glow behind
+  ctx.strokeStyle = 'rgba(143,109,219,0.3)';
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = 'rgba(143,109,219,0.4)'; ctx.shadowBlur = 12;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  // Gold core line
+  ctx.strokeStyle = 'rgba(212,175,106,0.8)';
+  ctx.lineWidth = 0.8;
+  ctx.shadowColor = 'rgba(212,175,106,0.5)'; ctx.shadowBlur = 6;
+  ctx.setLineDash([4, 6]);
+  ctx.lineDashOffset = -t * 0.03;
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+
+/* ────────────────────────────────────
+   3D Wireframe Globe Renderer
+   ──────────────────────────────────── */
+function renderGlobe(cx, cy, radius, alpha, t) {
+  if (alpha < 0.01 || radius < 4) return;
+
+  const K      = 2.5;    // perspective depth
+  const nLat   = 10;     // latitude lines
+  const nLon   = 14;     // longitude lines
+  const nPts   = 64;     // points per line
+  const zClip  = -0.25;  // hide back-facing
+
+  // Character set for surface scatter
+  const CHARS = '.·:;+*oO0#@';
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  const glow = 8 + Math.sin(t * 0.003) * 12;
+
+  // ── 3D → 2D projection ──
+  function proj(x, y, z) {
+    // Y-axis rotation
+    const cB = Math.cos(rotB), sB = Math.sin(rotB);
+    const rx = x * cB + z * sB, ry = y, rz = -x * sB + z * cB;
+    // X-axis rotation
+    const cA = Math.cos(rotA), sA = Math.sin(rotA);
+    const fx = rx, fy = ry * cA - rz * sA, fz = ry * sA + rz * cA;
+    // Perspective scale
+    const s = K / (K + fz + 1.5);
+    return { px: cx + fx * radius * s, py: cy - fy * radius * s, z: fz, s };
+  }
+
+  // ── Draw a single great-circle arc (hidden-line removed) ──
+  function drawArc(getPoint) {
+    let started = false;
+    for (let i = 0; i <= nPts; i++) {
+      const frac = i / nPts;
+      const { x, y, z } = getPoint(frac);
+      const p = proj(x, y, z);
+      if (p.z > zClip) {
+        const a = Math.min(1, (p.z - zClip) * 2.5) * 0.45;
+        ctx.strokeStyle = `rgba(212,175,106,${a})`;
+        if (!started) { ctx.beginPath(); ctx.moveTo(p.px, p.py); started = true; }
+        else ctx.lineTo(p.px, p.py);
+      } else {
+        if (started) ctx.stroke();
+        started = false;
+      }
+    }
+    if (started) ctx.stroke();
+  }
+
+  // ── Wireframe lines ──
+  ctx.lineWidth = 0.7;
+  ctx.shadowColor = 'rgba(180,140,220,0.6)';
+  ctx.shadowBlur = glow * 0.4;
+
+  // Longitude lines (vertical)
+  for (let i = 0; i < nLon; i++) {
+    const theta = (i / nLon) * Math.PI * 2;
+    drawArc(frac => {
+      const phi = frac * Math.PI - Math.PI / 2;
+      return { x: Math.cos(phi)*Math.cos(theta), y: Math.sin(phi), z: Math.cos(phi)*Math.sin(theta) };
+    });
+  }
+
+  // Latitude lines (horizontal)
+  for (let i = 1; i < nLat; i++) {
+    const phi = (i / nLat) * Math.PI - Math.PI / 2;
+    drawArc(frac => {
+      const theta = frac * Math.PI * 2;
+      return { x: Math.cos(phi)*Math.cos(theta), y: Math.sin(phi), z: Math.cos(phi)*Math.sin(theta) };
+    });
+  }
+
+  // ── Intersection dots ──
+  ctx.shadowBlur = glow;
+  for (let lo = 0; lo < nLon; lo++) {
+    const theta = (lo / nLon) * Math.PI * 2;
+    for (let la = 0; la <= nLat; la++) {
+      const phi = (la / nLat) * Math.PI - Math.PI / 2;
+      const x = Math.cos(phi)*Math.cos(theta), y = Math.sin(phi), z = Math.cos(phi)*Math.sin(theta);
+      const p = proj(x, y, z);
+      if (p.z > zClip) {
+        const depthAlpha = Math.min(1, (p.z - zClip) * 2) * 0.85;
+        const r = 1.2 + p.s * 1.8;
+        ctx.fillStyle = `rgba(212,175,106,${depthAlpha})`;
+        ctx.beginPath(); ctx.arc(p.px, p.py, r, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  }
+
+  // ── ASCII characters scattered on surface ──
+  ctx.shadowBlur = glow * 0.7;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const charDensity = Math.max(6, Math.floor(radius / 12));
+  for (let lo = 0; lo < charDensity * 2; lo++) {
+    const theta = (lo / (charDensity * 2)) * Math.PI * 2 + t * 0.0001;
+    for (let la = 1; la < charDensity; la++) {
+      const phi = (la / charDensity) * Math.PI - Math.PI / 2;
+      const x = Math.cos(phi)*Math.cos(theta), y = Math.sin(phi), z = Math.cos(phi)*Math.sin(theta);
+      const p = proj(x, y, z);
+      if (p.z > 0) {  // only clearly front-facing
+        const depthAlpha = Math.min(1, p.z * 1.5) * 0.7;
+        const fontSize = Math.max(6, 4 + p.s * radius * 0.06);
+        const ci = Math.floor(((p.z + 1) / 2) * (CHARS.length - 1));
+        ctx.font = `${fontSize}px 'Courier New',monospace`;
+        ctx.fillStyle = `rgba(216,199,163,${depthAlpha})`;
+        ctx.fillText(CHARS[ci], p.px, p.py);
+      }
+    }
+  }
+
+  // ── Equator ring (brighter) ──
+  ctx.lineWidth = 1.2;
+  ctx.shadowBlur = glow;
+  let eqStarted = false;
+  for (let i = 0; i <= nPts; i++) {
+    const theta = (i / nPts) * Math.PI * 2;
+    const x = Math.cos(theta), y = 0, z = Math.sin(theta);
+    const p = proj(x, y, z);
+    if (p.z > zClip) {
+      ctx.strokeStyle = `rgba(212,175,106,${Math.min(1, (p.z - zClip) * 2.5) * 0.7})`;
+      if (!eqStarted) { ctx.beginPath(); ctx.moveTo(p.px, p.py); eqStarted = true; }
+      else ctx.lineTo(p.px, p.py);
+    } else {
+      if (eqStarted) ctx.stroke();
+      eqStarted = false;
+    }
+  }
+  if (eqStarted) ctx.stroke();
+
+  ctx.restore();
+}
+
+
+/* ────────────────────────────────────
+   3D Wireframe Shape Renderer
+   ──────────────────────────────────── */
+function proj3D(cx,cy,sz,x,y,z){
+  const cB=Math.cos(rotB),sB=Math.sin(rotB);
+  const rx=x*cB+z*sB,ry=y,rz=-x*sB+z*cB;
+  const cA=Math.cos(rotA),sA=Math.sin(rotA);
+  const fx=rx,fy=ry*cA-rz*sA,fz=ry*sA+rz*cA;
+  const s=2.5/(2.5+fz+1.5);
+  return {px:cx+fx*sz*s, py:cy-fy*sz*s, z:fz, s};
+}
+
+function drawWireShape(cx,cy,sz,alpha,t,verts,edges){
+  if(alpha<0.01) return;
+  const glow=8+Math.sin(t*0.003)*10;
+  ctx.save(); ctx.globalAlpha=alpha;
+  ctx.shadowColor='rgba(143,109,219,0.4)'; ctx.shadowBlur=glow*0.3;
+  // edges
+  ctx.lineWidth=1.2;
+  for(const [a,b] of edges){
+    const pa=proj3D(cx,cy,sz,verts[a][0],verts[a][1],verts[a][2]);
+    const pb=proj3D(cx,cy,sz,verts[b][0],verts[b][1],verts[b][2]);
+    const za=Math.min(1,Math.max(0.1,(pa.z+1.5)/3));
+    ctx.strokeStyle=`rgba(255,255,255,${za*0.7})`;
+    ctx.beginPath(); ctx.moveTo(pa.px,pa.py); ctx.lineTo(pb.px,pb.py); ctx.stroke();
+  }
+  // vertices
+  for(const v of verts){
+    const p=proj3D(cx,cy,sz,v[0],v[1],v[2]);
+    const a2=Math.min(1,Math.max(0.1,(p.z+1.5)/3));
+    ctx.fillStyle=`rgba(212,175,106,${a2*0.9})`;
+    ctx.beginPath(); ctx.arc(p.px,p.py,2+p.s*2,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Shape definitions removed — spell cores in spells.js
+
+/* ── Transition particles ── */
+let sparkles = [];
+function spawnSparkles(x,y){
+  sparkles=[];
+  for(let i=0;i<30;i++){
+    const a=Math.random()*Math.PI*2, sp=2+Math.random()*6;
+    sparkles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:1,decay:0.02+Math.random()*0.03});
+  }
+}
+function drawSparkles(){
+  ctx.save(); ctx.shadowColor='rgba(212,175,106,0.5)'; ctx.shadowBlur=6;
+  for(let i=sparkles.length-1;i>=0;i--){
+    const s=sparkles[i]; s.x+=s.vx; s.y+=s.vy; s.vy+=0.1; s.vx*=0.96; s.vy*=0.96; s.life-=s.decay;
+    if(s.life<=0){sparkles.splice(i,1);continue;}
+    ctx.globalAlpha=s.life;
+    // Alternate gold and purple sparkles
+    ctx.fillStyle = (i%3===0) ? 'rgba(143,109,219,0.8)' : 'rgba(212,175,106,0.9)';
+    ctx.shadowColor = (i%3===0) ? 'rgba(143,109,219,0.5)' : 'rgba(212,175,106,0.5)';
+    ctx.beginPath(); ctx.arc(s.x,s.y,1.5,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ── Blast explosion — spell form disintegration ── */
+let blastFrame = 0;
+let blastCX = 0, blastCY = 0;
+let blastSpellType = 0;
+let blastShockR = 0;
+
+function _sampleSpellPoints(cx, cy, type, sz) {
+  const pts = [];
+  const T = performance.now() * 0.001;
+  switch(type) {
+    case 0: { // Flame — sample from flame envelope
+      const H=sz*2.2, W=sz*0.65;
+      for(let i=0;i<160;i++){
+        const s=i/90; const dS=Math.random();
+        const envW=W*Math.sin(dS*Math.PI)*(1-dS*0.5);
+        const px=cx+(Math.random()*2-1)*envW;
+        const py=cy-dS*H;
+        pts.push({x:px,y:py,bias:0.3}); // bias=upward tendency
+      }
+      break;
+    }
+    case 1: { // Rune Circle — sample from rings
+      const R=sz*1.8;
+      const radii=[R, R*0.68, R*0.42, R*0.15];
+      for(const r of radii){
+        const n=Math.max(12,Math.floor(r/4));
+        for(let i=0;i<n;i++){
+          const a=i/n*Math.PI*2+Math.random()*0.3;
+          pts.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r, bias:0});
+        }
+      }
+      break;
+    }
+    case 2: { // Crystal — edges and vertices
+      const topH=sz*1.6, botH=sz*0.8, midR=sz*0.5;
+      pts.push({x:cx,y:cy-topH,bias:-0.2});
+      pts.push({x:cx,y:cy+botH,bias:0.2});
+      for(let i=0;i<6;i++){
+        const a=i/6*Math.PI*2;
+        const mx=cx+Math.cos(a)*midR, my=cy+Math.sin(a)*midR*0.35;
+        pts.push({x:mx,y:my,bias:0});
+        for(let s=0.12;s<1;s+=0.12){
+          pts.push({x:cx+(mx-cx)*s, y:cy-topH+(my-cy+topH)*s, bias:-0.1});
+          pts.push({x:cx+(mx-cx)*s, y:cy+botH+(my-cy-botH)*s, bias:0.1});
+        }
+      }
+      break;
+    }
+    case 3: { // Portal — spiral + rings
+      const R=sz;
+      for(let i=0;i<60;i++){
+        const f=i/40;
+        const r=(1-f)*R*0.85;
+        const a=f*Math.PI*4;
+        pts.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r, bias:0, spiral:true});
+      }
+      for(let i=0;i<35;i++){
+        const a=i/20*Math.PI*2;
+        pts.push({x:cx+Math.cos(a)*R, y:cy+Math.sin(a)*R, bias:0});
+      }
+      break;
+    }
+    case 4: { // Lightning — sphere + arc endpoints
+      const R=sz*0.4;
+      for(let i=0;i<90;i++){
+        const a=Math.random()*Math.PI*2;
+        const r=Math.random()*R*1.5;
+        pts.push({x:cx+Math.cos(a)*r, y:cy+Math.sin(a)*r, bias:0, fast:Math.random()>0.5});
+      }
+      break;
+    }
+  }
+  return pts;
+}
+
+function spawnBlast(x, y) {
+  blastParticles = [];
+  blastFrame = 0;
+  blastCX = x; blastCY = y;
+  blastSpellType = shapeType;
+  blastShockR = 0;
+  const chars = '0123456789.:+*oO';
+  const sz = SPELL_SZ * 0.35; // sealed/compressed size
+  const sampled = _sampleSpellPoints(x, y, shapeType, sz);
+  // Generate particles from sampled spell points
+  for (let i = 0; i < sampled.length; i++) {
+    const s = sampled[i];
+    const dx = s.x - x, dy = s.y - y;
+    const dist = Math.sqrt(dx*dx+dy*dy) || 1;
+    const outA = Math.atan2(dy, dx) + (Math.random()-0.5)*0.8;
+    const spBase = blastSpellType===4 ? 4 : 2.5;
+    const sp = spBase + Math.random() * 8 + (dist/sz) * 3;
+    const bias = s.bias || 0;
+    blastParticles.push({
+      x: s.x, y: s.y,
+      vx: Math.cos(outA)*sp, vy: Math.sin(outA)*sp + bias*3 - Math.random()*1.5,
+      life: 1, decay: 0.007 + Math.random() * 0.010,
+      char: chars[Math.floor(Math.random()*chars.length)],
+      sz: 5 + Math.random()*7,
+      type: 'char', isPurple: Math.random()<0.25,
+      friction: 0.96 + Math.random()*0.025,
+      spiral: s.spiral || false
+    });
+  }
+  // Extra fill particles — dots and fragments
+  const extraCount = 160;
+  for (let i = 0; i < extraCount; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = Math.random() * sz * 0.8;
+    const px = x + Math.cos(a)*r, py = y + Math.sin(a)*r;
+    const outA = a + (Math.random()-0.5)*0.6;
+    const sp = 2 + Math.random() * 9;
+    const isDot = i < extraCount * 0.7; // 70% dots, 30% fragments
+    blastParticles.push({
+      x: px, y: py,
+      vx: Math.cos(outA)*sp, vy: Math.sin(outA)*sp - Math.random()*2,
+      life: 1, decay: 0.009 + Math.random() * 0.013,
+      char: isDot ? '' : chars[Math.floor(Math.random()*chars.length)],
+      sz: isDot ? 1 + Math.random()*2.5 : 4 + Math.random()*4,
+      type: isDot ? 'dot' : 'frag',
+      isPurple: Math.random()<0.3,
+      friction: 0.96 + Math.random()*0.025,
+      fragAngle: Math.random()*Math.PI*2,
+      fragLen: 3 + Math.random()*6
+    });
+  }
+}
+
+function drawBlast(t) {
+  blastFrame++;
+  const T = t * 0.001;
+  ctx.save();
+
+  // Phase 1: Flash + collapse (frames 1-3)
+  if (blastFrame <= 3) {
+    const ff = blastFrame / 3;
+    // Bright center flash
+    ctx.globalAlpha = (1 - ff) * 0.25;
+    ctx.shadowColor = 'rgba(229,201,138,0.8)'; ctx.shadowBlur = 60;
+    ctx.fillStyle = 'rgba(255,245,220,0.9)';
+    ctx.beginPath(); ctx.arc(blastCX, blastCY, 40*(1-ff*0.5), 0, Math.PI*2); ctx.fill();
+    // Purple halo
+    ctx.globalAlpha = (1-ff)*0.15;
+    ctx.shadowColor = 'rgba(143,109,219,0.7)'; ctx.shadowBlur = 80;
+    ctx.fillStyle = 'rgba(143,109,219,0.5)';
+    ctx.beginPath(); ctx.arc(blastCX, blastCY, 80*(1-ff*0.3), 0, Math.PI*2); ctx.fill();
+    // Render spell at boosted brightness, shrinking
+    ctx.globalAlpha = 1;
+    renderSpell(blastCX, blastCY, 1.5*(1-ff), t, 3, blastSpellType, {
+      mode: 'collapsing', collapseF: ff * 0.8
+    });
+  }
+
+  // Shockwave ring
+  if (blastFrame > 2 && blastFrame < 25) {
+    blastShockR += (blastFrame < 8) ? 18 : 8;
+    const sf = Math.max(0, 1 - (blastFrame-2)/22);
+    ctx.globalAlpha = sf * 0.35;
+    ctx.strokeStyle = 'rgba(212,175,106,0.6)';
+    ctx.lineWidth = 1.5 * sf;
+    ctx.shadowColor = 'rgba(143,109,219,0.4)'; ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.arc(blastCX, blastCY, blastShockR, 0, Math.PI*2); ctx.stroke();
+    // Inner purple ring
+    ctx.strokeStyle = 'rgba(143,109,219,0.4)';
+    ctx.lineWidth = 1 * sf;
+    ctx.beginPath(); ctx.arc(blastCX, blastCY, blastShockR*0.7, 0, Math.PI*2); ctx.stroke();
+  }
+
+  // Phase 2: Particles scatter
+  const glow = 8 + Math.sin(t*0.01) * 4;
+  for (let i = blastParticles.length-1; i >= 0; i--) {
+    const p = blastParticles[i];
+    // Don't move particles during flash phase
+    if (blastFrame > 2) {
+      p.x += p.vx; p.y += p.vy;
+      p.vy += 0.06; // very light gravity
+      p.vx *= p.friction; p.vy *= p.friction;
+      if (p.spiral) { // Portal-type particles get slight spin
+        const sa = Math.atan2(p.vy, p.vx) + 0.05;
+        const ss = Math.sqrt(p.vx*p.vx+p.vy*p.vy);
+        p.vx = Math.cos(sa)*ss; p.vy = Math.sin(sa)*ss;
+      }
+    }
+    p.life -= p.decay;
+    if (p.life <= 0) { blastParticles.splice(i,1); continue; }
+    // Brightness boost in early frames
+    const earlyBoost = blastFrame < 6 ? 1.3 : 1;
+    const alpha = p.life * earlyBoost;
+    ctx.globalAlpha = Math.min(1, alpha);
+    if (p.isPurple) {
+      ctx.fillStyle = 'rgba(143,109,219,0.85)';
+      ctx.shadowColor = 'rgba(143,109,219,0.5)'; ctx.strokeStyle = 'rgba(143,109,219,0.7)';
+    } else {
+      ctx.fillStyle = 'rgba(229,201,138,0.9)';
+      ctx.shadowColor = 'rgba(212,175,106,0.5)'; ctx.strokeStyle = 'rgba(229,201,138,0.7)';
+    }
+    ctx.shadowBlur = glow;
+    if (p.type === 'char') {
+      ctx.font = `${p.sz}px 'Courier New',monospace`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(p.char, p.x, p.y);
+    } else if (p.type === 'dot') {
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.sz * p.life, 0, Math.PI*2); ctx.fill();
+    } else { // frag — small line fragment
+      ctx.lineWidth = 0.8;
+      const fa = p.fragAngle + T * 2;
+      const fl = p.fragLen * p.life;
+      ctx.beginPath();
+      ctx.moveTo(p.x - Math.cos(fa)*fl*0.5, p.y - Math.sin(fa)*fl*0.5);
+      ctx.lineTo(p.x + Math.cos(fa)*fl*0.5, p.y + Math.sin(fa)*fl*0.5);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+/* ── Afterimage dissolve dust ── */
+function spawnAfterDust(x,y) {
+  for(let i=0;i<20;i++){
+    const a=Math.random()*Math.PI*2, sp=1+Math.random()*3;
+    afterimageDust.push({x:x+(Math.random()-0.5)*60, y:y+(Math.random()-0.5)*60,
+      vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-1, life:1, decay:0.025+Math.random()*0.02});
+  }
+}
+function drawAfterDust(){
+  if(afterimageDust.length===0) return;
+  ctx.save(); ctx.shadowBlur=4;
+  for(let i=afterimageDust.length-1;i>=0;i--){
+    const d=afterimageDust[i]; d.x+=d.vx; d.y+=d.vy; d.vy+=0.05; d.vx*=0.97; d.vy*=0.97; d.life-=d.decay;
+    if(d.life<=0){afterimageDust.splice(i,1);continue;}
+    ctx.globalAlpha=d.life*0.6;
+    const isP = i%3===0;
+    ctx.fillStyle = isP ? 'rgba(143,109,219,0.7)' : 'rgba(212,175,106,0.8)';
+    ctx.shadowColor = isP ? 'rgba(143,109,219,0.4)' : 'rgba(212,175,106,0.4)';
+    ctx.beginPath(); ctx.arc(d.x,d.y,1+d.life,0,Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ── Spell atmosphere overlay ── */
+function drawSpellAtmosphere(t){
+  if(stage!=='SHAPE' && stage!=='CHARGE' && stage!=='SEAL') return;
+  const T=t*0.001;
+  const ax = (stage==='CHARGE') ? orbX : (stage==='SEAL') ? sealCenterX : shapeX;
+  const ay = (stage==='CHARGE') ? orbY : (stage==='SEAL') ? sealCenterY : shapeY;
+  ctx.save();
+  switch(shapeType){
+    case 0: // Flame — warm gold-purple candlelight
+      const warmR=Math.max(canvas.width,canvas.height)*0.8;
+      const flGrad=ctx.createRadialGradient(ax,ay,0,ax,ay,warmR);
+      flGrad.addColorStop(0,'rgba(212,175,106,0.04)');
+      flGrad.addColorStop(0.4,'rgba(143,109,219,0.02)');
+      flGrad.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=flGrad; ctx.fillRect(0,0,canvas.width,canvas.height);
+      break;
+    case 1: // Rune — purple + gold dust motes
+      ctx.shadowBlur=3;
+      for(let i=0;i<10;i++){
+        const da=T*0.3+i*0.63;
+        const dr=100+Math.sin(T*0.5+i*2)*150;
+        const dx=ax+Math.cos(da)*dr, dy=ay+Math.sin(da)*dr;
+        ctx.globalAlpha=0.12+0.06*Math.sin(T*2+i);
+        ctx.fillStyle = i%3===0 ? 'rgba(143,109,219,0.8)' : 'rgba(212,175,106,1)';
+        ctx.shadowColor = i%3===0 ? 'rgba(143,109,219,0.3)' : 'rgba(212,175,106,0.3)';
+        ctx.beginPath(); ctx.arc(dx,dy,0.6,0,Math.PI*2); ctx.fill();
+      }
+      break;
+    case 2: // Crystal — purple-tinted sparkles
+      for(let i=0;i<6;i++){
+        const sx=ax+(Math.sin(T*1.5+i*4.1)-0.5)*200;
+        const sy=ay+(Math.cos(T*1.2+i*3.3)-0.5)*200;
+        const sa=Math.sin(T*4+i*5);
+        if(sa<0.7) continue;
+        ctx.globalAlpha=(sa-0.7)*1.5;
+        ctx.fillStyle = i%2===0 ? 'rgba(169,139,255,0.7)' : 'rgba(229,201,138,0.7)';
+        ctx.beginPath(); ctx.arc(sx,sy,0.8,0,Math.PI*2); ctx.fill();
+      }
+      break;
+    case 3: // Portal — deeper violet swirl
+      const pGrad=ctx.createRadialGradient(ax,ay,0,ax,ay,250);
+      pGrad.addColorStop(0,'rgba(122,90,200,0.05)');
+      pGrad.addColorStop(0.5,'rgba(143,109,219,0.025)');
+      pGrad.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle=pGrad; ctx.fillRect(0,0,canvas.width,canvas.height);
+      break;
+    case 4: // Lightning — purple-white flash
+      if(Math.random()>0.96){
+        ctx.globalAlpha=0.03+Math.random()*0.02;
+        ctx.fillStyle='rgba(169,139,255,0.8)';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+      }
+      break;
+  }
+  ctx.restore();
+}
+
+let lastFrameTime = 0;
+
+/* ── Fingertip light trail ── */
+const trail = [];  // [{x,y,t}]
+const TRAIL_MAX = 40;
+function updateTrail(tip, active) {
+  if (active && tip) {
+    trail.push({x: tip.x, y: tip.y, t: performance.now()});
+    if (trail.length > TRAIL_MAX) trail.shift();
+  } else {
+    // Fade out: remove oldest each frame
+    if (trail.length > 0) trail.shift();
+  }
+}
+function drawTrail(t) {
+  if (trail.length < 2) return;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.shadowColor = 'rgba(212,175,106,0.4)';
+  // Draw ribbon segments
+  for (let i = 1; i < trail.length; i++) {
+    const f = i / trail.length;
+    const a = f * f * 0.55;
+    const w = f * 2.5;
+    ctx.strokeStyle = `rgba(212,175,106,${a})`;
+    ctx.lineWidth = w;
+    ctx.shadowBlur = f * 8;
+    ctx.beginPath();
+    ctx.moveTo(trail[i-1].x, trail[i-1].y);
+    ctx.lineTo(trail[i].x, trail[i].y);
+    ctx.stroke();
+  }
+  // Tiny spark dots along trail
+  ctx.shadowBlur = 5;
+  for (let i = 0; i < trail.length; i += 3) {
+    const f = i / trail.length;
+    const age = (t - trail[i].t) * 0.001;
+    const sa = Math.max(0, (f * 0.4) * (1 - age * 0.5));
+    if (sa < 0.02) continue;
+    const jx = Math.sin(t * 0.008 + i * 1.7) * 3 * (1 - f);
+    const jy = Math.cos(t * 0.006 + i * 2.3) * 3 * (1 - f);
+    ctx.fillStyle = (i%4===0) ? `rgba(169,139,255,${sa})` : `rgba(229,201,138,${sa})`;
+    ctx.beginPath();
+    ctx.arc(trail[i].x + jx, trail[i].y + jy, 0.8 + f * 0.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ────────────────────────────────────
+   Resize canvas to match window
+   ──────────────────────────────────── */
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+
+/* ── Enter CHARGE helper ── */
+function _enterCharge(dist) {
+  stage = 'CHARGE';
+  chargeTimer = 0; chargeAlpha = 0.6;
+  orbX = shapeX; orbY = shapeY;
+  initialChargeDist = dist || 200;
+  compressionRatio = 1;
+  blastThresholdFrames = 0; chargeGrace = 0;
+  chargeParticles = [];
+  chargePoseTimer = 0;
+  // Record initial hand Y for push-down detection
+  if (leftPalmCenter && rightPalmRaw) {
+    initialChargeY = (leftPalmCenter.y + rightPalmRaw.y) / 2;
+  } else {
+    initialChargeY = orbY;
+  }
+  sfxCharge();
+  spawnSparkles(orbX, orbY);
+}
+
+/* ── Enter SEAL helper ── */
+function _enterSeal() {
+  stage = 'SEAL';
+  sealActive = true;
+  sealTimer = 0;
+  sealCenterX = orbX;
+  sealCenterY = orbY;
+  sealRingAngle = 0;
+  sealGrace = 0;
+  releaseThresholdFrames = 0;
+  sealCrackTimer = 0;
+  // Capture current hand distance and Y position
+  if (leftPalmCenter && rightPalmRaw) {
+    const hd = Math.abs(leftPalmCenter.x - rightPalmRaw.x);
+    const vd = Math.abs(leftPalmCenter.y - rightPalmRaw.y);
+    sealedDistance = Math.sqrt(hd*hd + vd*vd);
+    sealedCenterY = (leftPalmCenter.y + rightPalmRaw.y) / 2;
+  } else {
+    sealedDistance = 80;
+    sealedCenterY = orbY;
+  }
+  sfxSeal();
+  spawnSparkles(orbX, orbY);
+}
+
+/* ── Debug keyboard shortcuts ── */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'c' || e.key === 'C') {
+    if (stage === 'SHAPE') {
+      _enterCharge(200);
+      console.log('[DEBUG] Forced CHARGE');
+    }
+  }
+  if (e.key === 'x' || e.key === 'X') {
+    if (stage === 'CHARGE') {
+      _enterSeal();
+      console.log('[DEBUG] Forced SEAL');
+    }
+  }
+  if (e.key === 'r' || e.key === 'R') {
+    if (stage === 'SEAL') {
+      sealCrackTimer = 1;
+      console.log('[DEBUG] Forced RELEASE');
+    }
+  }
+});
+
+
+/* ────────────────────────────────────
+   Main render loop with state machine
+   ──────────────────────────────────── */
+function render() {
+  const t = performance.now();
+  resize();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  rotB += 0.014;  // Y-axis spin only
+  if(transformCD>0) transformCD--;
+  if(tapCD>0) tapCD--;
+
+  drawHands(t);
+  drawSparkles();
+  // Update and draw fingertip trail
+  const trailActive = (stage === 'GLOBE' || stage === 'SHAPE' || stage === 'CHARGE' || stage === 'SEAL');
+  updateTrail(rightTip, trailActive);
+  drawTrail(t);
+
+  // Track fist memory
+  if (rightGesture === 'FIST') wasFistTimer = 45;
+  if (wasFistTimer > 0) wasFistTimer--;
+
+  // ── STATE: IDLE ──
+  if (stage === 'IDLE') {
+    globeActive = false; wasFistTimer = 0;
+    let dist = 0;
+    if (leftTip && rightTip) {
+      const dx=rightTip.x-leftTip.x, dy=rightTip.y-leftTip.y;
+      dist = Math.sqrt(dx*dx+dy*dy);
+      if (dist < 100) { stage = 'GLOBE'; globeActive = true; globeGrace = 0; sfxSummon(); }
+    }
+    globeAlpha += (0 - globeAlpha) * 0.1;
+    shapeAlpha += (0 - shapeAlpha) * 0.1;
+  }
+
+  // ── STATE: GLOBE ──
+  else if (stage === 'GLOBE') {
+    let targetA = 1;
+
+    if (leftTip && rightTip) {
+      const dx=rightTip.x-leftTip.x, dy=rightTip.y-leftTip.y;
+      const dist = Math.sqrt(dx*dx+dy*dy);
+      const mx=(leftTip.x+rightTip.x)/2, my=(leftTip.y+rightTip.y)/2;
+      globeActive = true; globeGrace = 0;
+      const tr = Math.max(RAD_MIN, Math.min(RAD_MAX, dist * RAD_SCALE));
+      globeX += (mx-globeX)*POS_LERP; globeY += (my-globeY)*POS_LERP;
+      globeR += (tr-globeR)*RAD_LERP;
+    } else {
+      // Grace period: keep globe alive for 30 frames
+      globeGrace++;
+      if (globeGrace > 30) { globeActive = false; targetA = 0; }
+    }
+
+    // Check transform: right hand was FIST recently and now is PALM
+    if (wasFistTimer > 0 && rightGesture === 'PALM' && transformCD <= 0 && globeActive) {
+      stage = 'SHAPE'; transTimer = 30; transformCD = 60; wasFistTimer = 0; sfxWhoosh();
+      globeActive = false;
+      shapeX = globeX; shapeY = globeY; shapeType = 0;
+      activeHand = 'right'; isTransferring = false; swipeHistory.length = 0;
+      spawnSparkles(globeX, globeY);
+    }
+
+    if (!globeActive && globeAlpha < 0.02) stage = 'IDLE';
+    globeAlpha += (targetA - globeAlpha) * ALPHA_LERP;
+    if (!globeActive) globeR += (0-globeR)*0.06;
+
+    // Draw
+    if (globeAlpha > 0.01) {
+      if (leftTip && rightTip) drawLink(leftTip.x,leftTip.y,rightTip.x,rightTip.y,globeAlpha,t);
+      renderGlobe(globeX, globeY, globeR, globeAlpha, t);
+    }
+  }
+
+  // ── STATE: SHAPE ──
+  else if (stage === 'SHAPE') {
+    // Transition morph (initial globe→shape)
+    if (transTimer > 0) {
+      transTimer--;
+      const f = transTimer / 30;
+      globeAlpha = f;
+      shapeAlpha += ((1-f) - shapeAlpha) * 0.2;
+      if (globeAlpha > 0.01) renderGlobe(globeX, globeY, globeR * f, globeAlpha, t);
+    } else {
+      // Touch both index fingers → go back to GLOBE state
+      if (leftTip && rightTip) {
+        const dx=rightTip.x-leftTip.x, dy=rightTip.y-leftTip.y;
+        const dist = Math.sqrt(dx*dx+dy*dy);
+        if (dist < 100) {
+          stage = 'GLOBE'; globeActive = true;
+          globeX = (leftTip.x+rightTip.x)/2;
+          globeY = (leftTip.y+rightTip.y)/2;
+          globeR = RAD_MIN; globeAlpha = 0;
+          shapeAlpha = 0;
+          spawnSparkles(globeX, globeY);
+        }
+      }
+    }
+
+    // ── Hand ownership + transfer ──
+    if (transferCD > 0) transferCD--;
+    if (switchCD > 0) switchCD--;
+    const activeTip = activeHand === 'right' ? rightTip : leftTip;
+    const freeTip = activeHand === 'right' ? leftTip : rightTip;
+    const freePinch = activeHand === 'right' ? leftPinch : rightPinch;
+
+    // Update swipe history for active hand
+    if (activeTip) {
+      swipeHistory.push({x: activeTip.x, y: activeTip.y, t: performance.now()});
+      if (swipeHistory.length > SWIPE_HISTORY_LEN) swipeHistory.shift();
+    }
+
+    // Transfer animation
+    if (isTransferring) {
+      transferProgress += 0.08; // ~12 frames
+      if (transferProgress >= 1) {
+        isTransferring = false;
+        transferProgress = 1;
+        swipeHistory.length = 0; // reset after transfer
+      }
+      // Arc trajectory
+      const tp = Math.min(1, transferProgress);
+      const ease = tp * (2 - tp); // ease-out
+      const arcY = -60 * Math.sin(tp * Math.PI); // upward arc
+      shapeX = transferFromX + (transferToX - transferFromX) * ease;
+      shapeY = transferFromY + (transferToY - transferFromY) * ease + arcY;
+      // Trail particles during transfer
+      if (Math.random() > 0.4) {
+        sparkles.push({x: shapeX + (Math.random()-0.5)*10, y: shapeY + (Math.random()-0.5)*10,
+          vx: (Math.random()-0.5)*2, vy: (Math.random()-0.5)*2 - 1,
+          life: 0.7, decay: 0.04 + Math.random()*0.03});
+      }
+    } else {
+      // Spell follows active hand fingertip
+      if (activeTip) {
+        shapeX += (activeTip.x - shapeX) * POS_LERP;
+        shapeY += ((activeTip.y - 50) - shapeY) * POS_LERP;
+        globeGrace = 0;
+      } else if (handCount > 0) {
+        globeGrace = 0;
+      } else {
+        globeGrace++;
+        if (globeGrace > 60) {
+          shapeAlpha += (0 - shapeAlpha) * 0.08;
+          if (shapeAlpha < 0.02) { stage = 'IDLE'; globeGrace = 0; }
+        }
+      }
+
+      // ── Swipe detection for transfer ──
+      if (activeTip && swipeHistory.length >= 6 && transferCD <= 0 && !isTransferring) {
+        const oldest = swipeHistory[0];
+        const newest = swipeHistory[swipeHistory.length - 1];
+        const deltaX = newest.x - oldest.x;
+        const deltaY = newest.y - oldest.y;
+        const absDX = Math.abs(deltaX), absDY = Math.abs(deltaY);
+        // Must be horizontal swipe: |deltaX| > 90, |deltaY| < |deltaX| * 0.65
+        if (absDX > 90 && absDY < absDX * 0.65) {
+          let doTransfer = false;
+          if (activeHand === 'right' && deltaX < -90) doTransfer = true;  // swipe left
+          if (activeHand === 'left' && deltaX > 90) doTransfer = true;    // swipe right
+          if (doTransfer) {
+            const targetHand = activeHand === 'right' ? 'left' : 'right';
+            const destTip = targetHand === 'right' ? rightTip : leftTip;
+            if (destTip) {
+              transferFromX = shapeX; transferFromY = shapeY;
+              transferToX = destTip.x; transferToY = destTip.y - 50;
+              isTransferring = true; transferProgress = 0;
+              activeHand = targetHand;
+              transferCD = 30;
+              swipeHistory.length = 0;
+              sfxWhoosh();
+              spawnSparkles(shapeX, shapeY);
+            }
+          }
+        }
+      }
+    }
+
+    // Free hand pinch to change spell
+    if (freePinch && switchCD <= 0 && !isTransferring) {
+      prevSpellType = shapeType;
+      afterimageTimer = 30;
+      spawnAfterDust(shapeX, shapeY);
+      shapeType = (shapeType + 1) % 5;
+      switchCD = 25;
+      spawnSparkles(shapeX, shapeY);
+      sfxChime();
+    }
+
+    // Afterimage: render previous spell as fading ghost
+    // (afterimage disabled — instant switch)
+
+    // Track hand velocity (use active hand)
+    if (activeTip) {
+      const dx = activeTip.x - prevRightX, dy = activeTip.y - prevRightY;
+      const rawSpeed = Math.sqrt(dx*dx+dy*dy);
+      const normalized = Math.min(1, rawSpeed / 40);
+      handSpeed += (normalized - handSpeed) * 0.1;
+      prevRightX = activeTip.x; prevRightY = activeTip.y;
+    } else {
+      handSpeed *= 0.95;
+    }
+
+    // Render spell core
+    shapeAlpha = (globeGrace > 60) ? shapeAlpha : 1;
+    renderSpell(shapeX, shapeY, shapeAlpha, t, handSpeed);
+
+    // Draw spell atmosphere
+    drawSpellAtmosphere(t);
+
+    // ── CHARGE POSE DETECTION ── opposing / cupping hands
+    let _chgCandidate = false;
+    let _chgVGap = 0, _chgHGap = 0, _chgDist = 0;
+    let _dot = 0, _opposing = false, _cupping = false;
+    if (leftPalmCenter && rightPalmRaw && leftFingerDir && rightFingerDir && handCount >= 2) {
+      _chgHGap = Math.abs(leftPalmCenter.x - rightPalmRaw.x);
+      _chgVGap = Math.abs(leftPalmCenter.y - rightPalmRaw.y);
+      _chgDist = Math.sqrt(_chgHGap*_chgHGap + _chgVGap*_chgVGap);
+
+      // Direction dot product: negative = opposing
+      _dot = leftFingerDir.x * rightFingerDir.x + leftFingerDir.y * rightFingerDir.y;
+      _opposing = _dot < -0.15;
+
+      // Cupping: upper hand fingers point inward-left, lower hand fingers point inward-right
+      let upperDir, lowerDir;
+      if (leftPalmCenter.y < rightPalmRaw.y) {
+        upperDir = leftFingerDir; lowerDir = rightFingerDir;
+      } else {
+        upperDir = rightFingerDir; lowerDir = leftFingerDir;
+      }
+      _cupping = (upperDir.x < -0.15 && lowerDir.x > 0.15);
+
+      // Candidate: gap conditions + (opposing OR cupping)
+      const gapOk = _chgVGap > 70 && _chgVGap < 460 && _chgHGap < 360;
+      if (gapOk && (_opposing || _cupping)) {
+        _chgCandidate = true;
+        chargePoseTimer++;
+      } else {
+        chargePoseTimer = Math.max(0, chargePoseTimer - 1);
+      }
+      // Transition after 12 frames
+      if (chargePoseTimer > 12) {
+        _enterCharge(_chgDist);
+      }
+    } else {
+      chargePoseTimer = Math.max(0, chargePoseTimer - 1);
+    }
+    // Debug HUD
+    const dbg = document.getElementById('debugHud');
+    if (dbg) {
+      dbg.textContent = `STATE: ${stage}  activeHand: ${activeHand}\n` +
+        `transfer: ${isTransferring} CD: ${transferCD}\n` +
+        `swipeHist: ${swipeHistory.length}\n` +
+        `dot: ${_dot.toFixed(2)}\n` +
+        `opposing: ${_opposing}  cupping: ${_cupping}\n` +
+        `hGap: ${Math.round(_chgHGap)}  vGap: ${Math.round(_chgVGap)}\n` +
+        `holdFrames: ${chargePoseTimer}\n` +
+        `chargeReady: ${chargePoseTimer > 12}`;
+    }
+  }
+
+  // ── STATE: CHARGE ──
+  else if (stage === 'CHARGE') {
+    chargeTimer++;
+    chargeAlpha += (1 - chargeAlpha) * 0.15;
+    // Track orb position between hands
+    if (leftPalmCenter && rightPalmRaw) {
+      const midX = (leftPalmCenter.x + rightPalmRaw.x) / 2;
+      const midY = (leftPalmCenter.y + rightPalmRaw.y) / 2;
+      orbX += (midX - orbX) * 0.16;
+      orbY += (midY - orbY) * 0.16;
+      const hd = Math.abs(leftPalmCenter.x - rightPalmRaw.x);
+      const vd = Math.abs(leftPalmCenter.y - rightPalmRaw.y);
+      const curDist = Math.sqrt(hd*hd + vd*vd);
+      if (initialChargeDist > 0) {
+        compressionRatio += ((curDist / initialChargeDist) - compressionRatio) * 0.12;
+        compressionRatio = Math.max(0.25, Math.min(1.2, compressionRatio));
+      }
+      chargeGrace = 0;
+      // Push down → instant BLAST (skip SEAL)
+      if (chargeTimer > 10 && midY > initialChargeY + 35) {
+        spawnBlast(orbX, orbY);
+        stage = 'BLAST'; sfxBlast();
+        globeAlpha = 0; shapeAlpha = 0; chargeAlpha = 0; globeActive = false;
+      }
+      // SEAL threshold: compression < 0.45 for 6 consecutive frames
+      else if (chargeTimer > 15 && compressionRatio < 0.45) {
+        blastThresholdFrames++;
+        if (blastThresholdFrames >= 6) { _enterSeal(); }
+      } else {
+        blastThresholdFrames = Math.max(0, blastThresholdFrames - 1);
+      }
+    } else {
+      chargeGrace++;
+      if (chargeGrace > 30) {
+        stage = 'SHAPE'; shapeAlpha = 1; chargeAlpha = 0; chargePoseTimer = 0;
+      }
+    }
+    // ── RENDER CHARGE ──
+    const T = t * 0.001;
+    const clamped = Math.max(0.35, Math.min(1.0, compressionRatio));
+    const unstable = compressionRatio < 0.55;
+    const shake = unstable ? (Math.random()-0.5) * 6 * (1-compressionRatio) : 0;
+    const drawX = orbX + shake, drawY = orbY + shake * 0.7;
+    if (leftPalmCenter && rightPalmRaw) {
+      ctx.save();
+      ctx.strokeStyle = `rgba(143,109,219,${0.18 * chargeAlpha})`;
+      ctx.lineWidth = 2.5; ctx.shadowColor = 'rgba(143,109,219,0.35)'; ctx.shadowBlur = 10;
+      ctx.beginPath(); ctx.moveTo(leftPalmCenter.x, leftPalmCenter.y); ctx.lineTo(drawX, drawY); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rightPalmRaw.x, rightPalmRaw.y); ctx.lineTo(drawX, drawY); ctx.stroke();
+      ctx.strokeStyle = `rgba(212,175,106,${0.25 * chargeAlpha})`;
+      ctx.lineWidth = 0.8 + (1-clamped)*0.5;
+      ctx.shadowColor = 'rgba(212,175,106,0.3)'; ctx.shadowBlur = 6;
+      ctx.setLineDash([3, 5]); ctx.lineDashOffset = -t * 0.04;
+      ctx.beginPath(); ctx.moveTo(leftPalmCenter.x, leftPalmCenter.y); ctx.lineTo(drawX, drawY); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(rightPalmRaw.x, rightPalmRaw.y); ctx.lineTo(drawX, drawY); ctx.stroke();
+      ctx.setLineDash([]); ctx.restore();
+    }
+    ctx.save(); ctx.shadowBlur = 4;
+    for (let i = 0; i < 12; i++) {
+      const life = (T * (0.6 + (1-clamped)*1.5) + i * 0.25) % 1.2;
+      const lf = life / 1.2;
+      const pullR = SPELL_SZ * clamped * 1.8 * (1 - lf);
+      const pa = lf * Math.PI * 2 + i * Math.PI * 2 / 12 + T;
+      const px = drawX + Math.cos(pa) * pullR, py = drawY + Math.sin(pa) * pullR;
+      const pA = lf * 0.3 * chargeAlpha;
+      if (pA < 0.02) continue;
+      ctx.globalAlpha = pA;
+      const isP = i%3===0;
+      ctx.fillStyle = isP ? 'rgba(143,109,219,0.7)' : 'rgba(212,175,106,0.8)';
+      ctx.shadowColor = isP ? 'rgba(143,109,219,0.3)' : 'rgba(212,175,106,0.3)';
+      ctx.beginPath(); ctx.arc(px, py, 0.6 + lf, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+    renderSpell(drawX, drawY, 1, t, handSpeed, undefined, {
+      mode: 'charging', compression: compressionRatio,
+      intensity: 1 + (1 - clamped) * 2, chargeAlpha: chargeAlpha
+    });
+    if (unstable) {
+      ctx.save(); ctx.translate(drawX, drawY);
+      ctx.strokeStyle = `rgba(169,139,255,${0.35 * (1-compressionRatio)})`;
+      ctx.lineWidth = 0.6; ctx.shadowColor = 'rgba(143,109,219,0.5)'; ctx.shadowBlur = 8;
+      for (let i = 0; i < 5; i++) {
+        const ca = Math.sin(T*8+i*5) * Math.PI * 2;
+        const cr = SPELL_SZ * clamped * 0.5 * (0.8 + Math.random()*0.6);
+        ctx.beginPath(); ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(ca)*cr, Math.sin(ca)*cr); ctx.stroke();
+      }
+      ctx.restore();
+    }
+    drawSpellAtmosphere(t);
+  }
+
+  // ── STATE: SEAL ──
+  else if (stage === 'SEAL') {
+    sealTimer++;
+    sealRingAngle += 0.04;
+    const T = t * 0.001;
+    const sealPulse = 0.7 + 0.3 * Math.sin(T * 4);
+    const sealSz = SPELL_SZ * (0.3 + 0.05 * Math.sin(T * 6));
+    const shake = (Math.random()-0.5) * 3;
+    const sx = sealCenterX + shake, sy = sealCenterY + shake * 0.7;
+
+    // Check release gesture: hands opening outward
+    if (sealCrackTimer > 0) {
+      // ── RELEASE ANIMATION ──
+      sealCrackTimer++;
+      const cf = Math.min(1, sealCrackTimer / 12);
+      // Rune seal cracks and expands
+      ctx.save(); ctx.translate(sealCenterX, sealCenterY);
+      ctx.globalAlpha = (1 - cf) * 0.8;
+      for (let r = 0; r < 3; r++) {
+        const rr = sealSz * (1.2 + r * 0.35) + cf * 120;
+        ctx.strokeStyle = `rgba(212,175,106,${(1-cf)*0.6})`;
+        ctx.lineWidth = 2 - cf; ctx.shadowColor = 'rgba(143,109,219,0.6)'; ctx.shadowBlur = 15;
+        ctx.beginPath(); ctx.arc(0, 0, rr, 0, Math.PI*2); ctx.stroke();
+      }
+      // Bright flash
+      ctx.globalAlpha = cf * 0.12;
+      ctx.fillStyle = 'rgba(229,201,138,0.9)';
+      ctx.beginPath(); ctx.arc(0, 0, 200 * cf, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+      // Spell shrinks to point
+      renderSpell(sealCenterX, sealCenterY, 1 - cf, t, 3, undefined, {
+        mode: 'collapsing', collapseF: cf
+      });
+      if (sealCrackTimer >= 12) {
+        spawnBlast(sealCenterX, sealCenterY);
+        stage = 'BLAST'; sfxBlast();
+        globeAlpha = 0; shapeAlpha = 0; chargeAlpha = 0; globeActive = false;
+        sealActive = false;
+      }
+    } else {
+      // ── SEALED STATE — detect release ──
+      if (leftPalmCenter && rightPalmRaw) {
+        const hd = Math.abs(leftPalmCenter.x - rightPalmRaw.x);
+        const vd = Math.abs(leftPalmCenter.y - rightPalmRaw.y);
+        const curDist = Math.sqrt(hd*hd + vd*vd);
+        const curMidY = (leftPalmCenter.y + rightPalmRaw.y) / 2;
+        // Release: push downward
+        const pushDown = curMidY > sealedCenterY + 35;
+        if (pushDown) {
+          // Push down = instant release
+          sealCrackTimer = 1;
+          sealCenterX += ((leftPalmCenter.x + rightPalmRaw.x)/2 - sealCenterX) * 0.15;
+          sealCenterY += (curMidY - sealCenterY) * 0.15;
+        }
+        sealGrace = 0;
+      } else {
+        sealGrace++;
+        if (sealGrace > 45) {
+          stage = 'SHAPE'; shapeAlpha = 1; chargeAlpha = 0; sealActive = false; chargePoseTimer = 0;
+        }
+      }
+      // ── RENDER SEAL ──
+      // Compressed spell core — smaller, brighter
+      renderSpell(sx, sy, sealPulse, t, 2, undefined, {
+        mode: 'charging', compression: 0.3, intensity: 3, chargeAlpha: 1
+      });
+      // Rune seal rings
+      ctx.save(); ctx.translate(sealCenterX, sealCenterY);
+      for (let r = 0; r < 3; r++) {
+        const rr = sealSz * (1.2 + r * 0.35);
+        const ringA = sealRingAngle * (r % 2 === 0 ? 1 : -0.7) + r * 0.5;
+        ctx.save(); ctx.rotate(ringA);
+        ctx.shadowColor = 'rgba(143,109,219,0.5)'; ctx.shadowBlur = 12;
+        ctx.strokeStyle = `rgba(212,175,106,${0.5 + r * 0.1})`;
+        ctx.lineWidth = 1.5 - r * 0.3;
+        ctx.beginPath(); ctx.arc(0, 0, rr, 0, Math.PI*2); ctx.stroke();
+        // Rune tick marks
+        const ticks = 8 + r * 4;
+        for (let i = 0; i < ticks; i++) {
+          const ta = i / ticks * Math.PI * 2;
+          const t1 = rr * 0.92, t2 = rr * 1.08;
+          ctx.strokeStyle = `rgba(212,175,106,${0.3 + 0.2 * Math.sin(T*5+i)})`;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(Math.cos(ta)*t1, Math.sin(ta)*t1);
+          ctx.lineTo(Math.cos(ta)*t2, Math.sin(ta)*t2); ctx.stroke();
+        }
+        ctx.restore();
+      }
+      // Energy cracks / instability lines
+      ctx.strokeStyle = `rgba(169,139,255,${0.3 + 0.2 * Math.sin(T*7)})`;
+      ctx.lineWidth = 0.7; ctx.shadowColor = 'rgba(143,109,219,0.6)'; ctx.shadowBlur = 10;
+      for (let i = 0; i < 6; i++) {
+        const ca = T * 3 + i * Math.PI * 2 / 6;
+        const cr = sealSz * (0.4 + Math.random() * 0.5);
+        ctx.beginPath(); ctx.moveTo(0, 0);
+        const jx = Math.cos(ca)*cr + (Math.random()-0.5)*8;
+        const jy = Math.sin(ca)*cr + (Math.random()-0.5)*8;
+        ctx.lineTo(jx, jy); ctx.stroke();
+      }
+      // Tight orbiting particles
+      ctx.shadowBlur = 5;
+      for (let i = 0; i < 16; i++) {
+        const pa = T * 3 + i * Math.PI * 2 / 16;
+        const pr = sealSz * (0.6 + 0.2 * Math.sin(T*4+i));
+        const px = Math.cos(pa)*pr, py = Math.sin(pa)*pr;
+        const pAlpha = 0.3 + 0.2 * Math.sin(T*6+i*2);
+        ctx.globalAlpha = pAlpha;
+        const isP = i%3===0;
+        ctx.fillStyle = isP ? 'rgba(143,109,219,0.8)' : 'rgba(212,175,106,0.9)';
+        ctx.shadowColor = isP ? 'rgba(143,109,219,0.4)' : 'rgba(212,175,106,0.4)';
+        ctx.beginPath(); ctx.arc(px, py, 0.8 + Math.sin(T*8+i)*0.3, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.restore();
+      // Bright sealed core glow
+      ctx.save();
+      ctx.globalAlpha = sealPulse * 0.4;
+      ctx.shadowColor = 'rgba(143,109,219,0.7)'; ctx.shadowBlur = 30;
+      ctx.fillStyle = 'rgba(229,201,138,0.6)';
+      ctx.beginPath(); ctx.arc(sealCenterX, sealCenterY, sealSz*0.25, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+      drawSpellAtmosphere(t);
+    }
+  }
+
+  // ── STATE: BLAST ──
+  if (stage === 'BLAST') {
+    drawBlast(t);
+    if (blastParticles.length === 0 && blastFrame > 10) {
+      // Return to SHAPE so user can immediately charge again
+      stage = 'SHAPE';
+      shapeAlpha = 1;
+      chargePoseTimer = 0;
+      if (rightTip) { shapeX = rightTip.x; shapeY = rightTip.y - 70; }
+      else { shapeX = blastCX; shapeY = blastCY; }
+    }
+  }
+
+  // ── HUD ──
+  let hudTopRight = '';
+  let hudBottom = '';
+  if (stage === 'SHAPE') {
+    hudTopRight = `SPELL: ${SHAPE_NAMES[shapeType]}`;
+    const freeLabel = activeHand === 'right' ? 'LEFT' : 'RIGHT';
+    const swipeDir = activeHand === 'right' ? 'LEFT' : 'RIGHT';
+    hudBottom = `SWIPE ${swipeDir} TO PASS  ·  ${freeLabel} PINCH TO CHANGE  ·  FRAME TO CHANNEL`;
+  } else if (stage === 'CHARGE') {
+    hudTopRight = `✦ CHANNELING: ${SHAPE_NAMES[shapeType]} ✦`;
+    hudBottom = 'CHANNELING SPELL  ·  CLOSE HANDS TO SEAL';
+  } else if (stage === 'SEAL') {
+    hudTopRight = `✦ SEALED: ${SHAPE_NAMES[shapeType]} ✦`;
+    hudBottom = 'SPELL SEALED  ·  PUSH DOWN TO RELEASE';
+  } else if (stage === 'BLAST') {
+    hudTopRight = '✦ MAGICAL DISCHARGE ✦';
+    hudBottom = '';
+  } else if (stage === 'GLOBE') {
+    hudTopRight = 'ARCANE ORB';
+    hudBottom = 'PULL APART TO GROW  ·  RIGHT FIST THEN OPEN TO TRANSFORM';
+  } else {
+    hudTopRight = '';
+    hudBottom = 'BRING TWO FINGERS TOGETHER TO SUMMON';
+  }
+  hudTL.textContent = handCount > 0
+    ? `✦ ARCANE LINK · ${stage} · L:${leftGesture} R:${rightGesture}`
+    : '✦ AWAITING PRESENCE';
+  hudTR.textContent = hudTopRight;
+  hudBtm.textContent = hudBottom;
+
+  // Debug HUD
+  const dbgEl = document.getElementById('debugHud');
+  if (dbgEl && stage === 'CHARGE') {
+    dbgEl.textContent = `STATE: CHARGE\n` +
+      `orbPos: ${Math.round(orbX)},${Math.round(orbY)}\n` +
+      `compression: ${compressionRatio.toFixed(2)}\n` +
+      `chargeTimer: ${chargeTimer}\n` +
+      `sealFrames: ${blastThresholdFrames}`;
+  } else if (dbgEl && stage === 'SEAL') {
+    dbgEl.textContent = `STATE: SEAL\n` +
+      `sealCenter: ${Math.round(sealCenterX)},${Math.round(sealCenterY)}\n` +
+      `sealedDist: ${Math.round(sealedDistance)}\n` +
+      `sealTimer: ${sealTimer}\n` +
+      `releaseFrames: ${releaseThresholdFrames}\n` +
+      `crackTimer: ${sealCrackTimer}`;
+  } else if (dbgEl && stage !== 'SHAPE') {
+    dbgEl.textContent = '';
+  }
+
+  lastFrameTime = t;
+  requestAnimationFrame(render);
+}
+
+
+/* ────────────────────────────────────
+   Init MediaPipe + Camera
+   ──────────────────────────────────── */
+async function init() {
+  startBtn.textContent = 'LOADING...';
+  startBtn.disabled = true;
+
+  try {
+    loadStat.textContent = 'LOADING MODEL...';
+    const hands = new Hands({
+      locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`
+    });
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.55
+    });
+    hands.onResults(onResults);
+    await hands.initialize();
+
+    loadStat.textContent = 'STARTING CAMERA...';
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 1280, height: 720, facingMode: 'user' }
+    });
+    video.srcObject = stream;
+    await new Promise(r => { video.onloadedmetadata = r; });
+    video.play();
+
+    // Hide init screen
+    initScr.style.display = 'none';
+
+    // Detection loop ~30fps
+    setInterval(async () => {
+      if (video.readyState >= 2) {
+        try { await hands.send({ image: video }); } catch(e) {}
+      }
+    }, 34);
+
+    // Start rendering
+    requestAnimationFrame(render);
+
+  } catch (e) {
+    console.error('Init failed:', e);
+    loadStat.textContent = `ERROR: ${e.message || e}`;
+    startBtn.textContent = 'RETRY';
+    startBtn.disabled = false;
+  }
+}
+
+startBtn.addEventListener('click', () => { ensureAudio(); init(); });
+</script>
+</body>
+</html>
