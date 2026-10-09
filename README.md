@@ -1,10 +1,22 @@
 # Magic Orbit
 
-A browser-based interactive creative coding experiment by Michelle Guan.
+> Hand gestures meet ASCII magic.
 
-## Live demo
+[**View live demo →**](https://michmich02.github.io/magic-orbit/)
 
-https://michmich02.github.io/magic-orbit/
+## Overview
+
+Magic Orbit is a real-time interaction study built around the contrast between tactile hand movement and low-resolution ASCII graphics. Gesture input changes the rhythm and character of the orbiting composition.
+
+## Interaction
+
+- Allow camera access.
+- Place one hand in view.
+- Move and pose your hand to influence the orbit.
+
+## Built with
+
+`JavaScript` · `MediaPipe` · `ASCII rendering` · `CSS`
 
 ## Run locally
 
@@ -12,14 +24,10 @@ https://michmich02.github.io/magic-orbit/
 python3 -m http.server 8000 --directory docs
 ```
 
-Open http://localhost:8000. Camera access requires localhost or HTTPS. Use a desktop browser and good lighting; allow camera or microphone access when the experience asks for it. External models and CDN scripts require internet access.
+Open [http://localhost:8000](http://localhost:8000) in a desktop browser. Camera and microphone APIs require localhost or HTTPS; external models and CDN dependencies require an internet connection.
 
-## Files
+## Design notes
 
-The root contains the project source. `docs/` contains the prepared static demo.
-
-## Publishing
-
-Enable GitHub Pages with **Deploy from a branch**, branch **main**, folder **/docs**.
-
-Camera, microphone and gesture behavior should be verified on the target device.
+- Immediate visual feedback keeps the gesture-to-effect relationship legible.
+- The experience is designed as a focused, full-screen interaction.
+- Processing happens in the browser; camera and microphone streams are not uploaded by this project.
